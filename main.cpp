@@ -1,8 +1,23 @@
 #define END_TIME 5000
 
+#define MEDIA_1 0
+#define MEDIA_2 1
+#define CHEMO_1 2
+#define CHEMO_2 3
+#define CELLSTAT 4
+#define WASTE 5
+#define CLEANING_WASTE 6
+#define NaOH 7
+#define ETHANOL 8
+#define WATER 9
+#define AIR 10
+
 #include <QCoreApplication>
 
 #include <easylogging++.h>
+
+#include "fluidControl/executable/ExecutableMachineGraph.h"
+#include "fluidControl/mapping/pathcalculator/PathManager.h"
 
 #include "protocolGraph/ProtocolGraph.h"
 #include "protocolGraph/OperationNode.h"
@@ -75,6 +90,43 @@ shared_ptr<OperationNode> createifOperation (int initTime,
     }
     return ifNode;
 }
+shared_ptr<OperationNode> createifOperation (int initTime,
+                        int durationTime,
+                        std::shared_ptr<OperationNode> yesBranch,
+                        std::shared_ptr<OperationNode> noBranch,
+                        AutoEnumerate & serial,
+                        ProtocolGraph* protocol,
+                        shared_ptr<ComparisonOperable> & outCompare)
+{
+      shared_ptr<MathematicOperable> init =
+            shared_ptr<MathematicOperable>(new ConstantNumber(initTime));
+    shared_ptr<MathematicOperable> end =
+            shared_ptr<MathematicOperable>(new ConstantNumber(initTime + durationTime));
+    shared_ptr<MathematicOperable> vTime =
+            shared_ptr<MathematicOperable>(new VariableEntry(TIME_VARIABLE));
+
+    shared_ptr<ComparisonOperable> compareInit =
+            shared_ptr<ComparisonOperable>(new SimpleComparison(false, vTime, comparison::greater, init));
+    shared_ptr<ComparisonOperable> compareEnd =
+            shared_ptr<ComparisonOperable>(new SimpleComparison(false, vTime, comparison::less_equal, end));
+    shared_ptr<ComparisonOperable> andCompare =
+            shared_ptr<ComparisonOperable>(new BooleanComparison(false, compareInit, logical::BooleanOperator::conjunction, compareEnd));
+    shared_ptr<ComparisonOperable> notAndCompare =
+            shared_ptr<ComparisonOperable>(new BooleanComparison(true, compareInit, logical::BooleanOperator::conjunction, compareEnd));
+
+    shared_ptr<OperationNode> ifNode =
+            shared_ptr<OperationNode>(new DivergeNode(serial.getNextValue(),andCompare));
+
+    protocol->addOperation(ifNode);
+    protocol->connectOperation(ifNode, yesBranch, andCompare);
+    if (noBranch) {
+        protocol->connectOperation(ifNode, noBranch, notAndCompare);
+    } else {
+        outCompare = notAndCompare;
+    }
+
+    return ifNode;
+}
 
 ProtocolGraph* makeTurbidostat() {
     AutoEnumerate serial;
@@ -96,7 +148,7 @@ ProtocolGraph* makeTurbidostat() {
     std::shared_ptr<MathematicOperable> num0(new ConstantNumber(0));
     std::shared_ptr<MathematicOperable> num0_1(new ConstantNumber(0.1));
     std::shared_ptr<MathematicOperable> num600(new ConstantNumber(600));
-    std::shared_ptr<MathematicOperable> num2(new ConstantNumber(2));
+    std::shared_ptr<MathematicOperable> num2(new ConstantNumber(0.00033));
 
     ProtocolGraph::ProtocolNodePtr op1 = std::make_shared<AssignationOperation>(serial.getNextValue(),
         epsilon, num0_1); //epsilon = 1
@@ -161,7 +213,7 @@ ProtocolGraph* makeTurbidostat() {
         new VariableEntry("normOD"));
 
     std::shared_ptr<MathematicOperable> operation1_1( //(od - threshold)
-        new ArithmeticOperation(mod, arithmetic::minus, mthreshold));
+        new ArithmeticOperation(threshold, arithmetic::minus, od));
     std::shared_ptr<MathematicOperable> operation1( //(od - threshold) /threshold
         new ArithmeticOperation(operation1_1, arithmetic::divide,
             mthreshold));
@@ -176,7 +228,7 @@ ProtocolGraph* makeTurbidostat() {
             shared_ptr<MathematicOperable>(new ArithmeticOperation(normOD, arithmetic::multiply, rate)); //normOd*rate
     shared_ptr<MathematicOperable> normOdPlusRate2 =
             shared_ptr<MathematicOperable>(new ArithmeticOperation(rate, arithmetic::plus, normOdPlusRate)); //rate + normOd*rate
-    ProtocolGraph::ProtocolNodePtr op9 = std::make_shared<AssignationOperation>(serial.getNextValue(), normOD,
+    ProtocolGraph::ProtocolNodePtr op9 = std::make_shared<AssignationOperation>(serial.getNextValue(), rate,
         normOdPlusRate2); // rate = rate + prop*rate
 
     protocol->addOperation(op9);
@@ -198,23 +250,84 @@ ProtocolGraph* makeTurbidostat() {
     return protocol;
 }
 
-ProtocolGraph* makeEvoprogProtocol() {
-   /* ProtocolGraph* protocol = new ProtocolGraph("evoprogProtocol");
+ProtocolGraph* makeQuemostat() {
+    AutoEnumerate serial;
+    ProtocolGraph* protocol = new ProtocolGraph("quemostat");
+
+    std::shared_ptr<MathematicOperable> num0(new ConstantNumber(0));
+    std::shared_ptr<MathematicOperable> num2(new ConstantNumber(0.00033));
+    std::shared_ptr<MathematicOperable> num1000(new ConstantNumber(100));
+
+    std::shared_ptr<ComparisonOperable> tautology(new Tautology());
+
+    ProtocolGraph::ProtocolNodePtr op4 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num1000); //loadContainer(1, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op5 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 2, num0); //loadContainer(2, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op6 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 3, num0); //loadContainer(3, 1000ml)
+
+    protocol->addOperation(op4);
+    protocol->addOperation(op5);
+    protocol->addOperation(op6);
+
+    protocol->setStartNode(0);
+    protocol->connectOperation(op4, op5, tautology);
+    protocol->connectOperation(op5, op6, tautology);
+
+    std::shared_ptr<MathematicOperable> num20(new ConstantNumber(20000));
+    std::shared_ptr<VariableEntry> time(
+        new VariableEntry(TIME_VARIABLE));
+    std::shared_ptr<MathematicOperable> mtime(
+        new VariableEntry(TIME_VARIABLE));
+
+    std::shared_ptr<ComparisonOperable> comp1(
+        new SimpleComparison(false, mtime, comparison::less, num20));
+
+    ProtocolGraph::ProtocolNodePtr loop1 = std::make_shared<LoopNode>(serial.getNextValue(), comp1); //while (t < 20)
+
+    protocol->addOperation(loop1);
+    protocol->connectOperation(op6, loop1, tautology);
+
+    ProtocolGraph::ProtocolNodePtr timeStep = std::make_shared<TimeStep>(serial.getNextValue(), time);
+    protocol->addOperation(timeStep);
+
+    ProtocolGraph::ProtocolNodePtr op10 = std::make_shared<SetContinousFlow>(serial.getNextValue(), 1, 2,
+        num2); // setcontinousFlow(1,2,rate)
+
+    protocol->addOperation(op10);
+    shared_ptr<OperationNode> nodeIf = createifOperation(0, 20000, op10, timeStep, serial, protocol);
+
+    protocol->connectOperation(loop1,nodeIf, comp1);
+
+    ProtocolGraph::ProtocolNodePtr op11 = std::make_shared<SetContinousFlow>(serial.getNextValue(), 2, 3,
+        num2); // setcontinousFlow(2,3,rate)
+    protocol->addOperation(op11);
+    protocol->connectOperation(op10, op11, tautology);
+
+    protocol->connectOperation(op11, timeStep, tautology);
+    protocol->connectOperation(timeStep, loop1, tautology);
+    return protocol;
+}
+
+ProtocolGraph* makeEvoprogProtocolClean() {
+    ProtocolGraph* protocol = new ProtocolGraph("evoprogProtocol");
     AutoEnumerate serial;
     protocol->setStartNode(0);
 
+    std::shared_ptr<ComparisonOperable> tautology(new Tautology());
+    std::shared_ptr<MathematicOperable> num0(new ConstantNumber(0));
     std::shared_ptr<MathematicOperable> num1000(new ConstantNumber(100));
-    ProtocolGraph::ProtocolNodePtr op0 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num1000); //loadContainer(1, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op1 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 2, num0); //loadContainer(2, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op2 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 3, num0); //loadContainer(3, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op3 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num1000); //loadContainer(1, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op4 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 2, num0); //loadContainer(2, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op5 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 3, num0); //loadContainer(3, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op6 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num1000); //loadContainer(1, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op7 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 2, num0); //loadContainer(2, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op8 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 3, num0); //loadContainer(3, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op9 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num1000); //loadContainer(1, 1000ml)
-    ProtocolGraph::ProtocolNodePtr op10 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 2, num0); //loadContainer(2, 1000ml)
+    std::shared_ptr<MathematicOperable> num2(new ConstantNumber(0.02));
+
+    ProtocolGraph::ProtocolNodePtr op0 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), MEDIA_1, num1000); //loadContainer(1, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op1 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), MEDIA_2, num1000); //loadContainer(2, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op2 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), NaOH, num1000); //loadContainer(3, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op3 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), WATER, num1000); //loadContainer(1, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op4 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), AIR, num1000); //loadContainer(2, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op5 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), ETHANOL, num1000); //loadContainer(3, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op6 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), CHEMO_1, num0); //loadContainer(1, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op7 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), CHEMO_2, num0); //loadContainer(2, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op8 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), CELLSTAT, num0); //loadContainer(3, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op9 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), WASTE, num0); //loadContainer(1, 1000ml)
+    ProtocolGraph::ProtocolNodePtr op10 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), CLEANING_WASTE, num0); //loadContainer(2, 1000ml)
 
     protocol->addOperation(op0);
     protocol->addOperation(op1);
@@ -230,6 +343,7 @@ ProtocolGraph* makeEvoprogProtocol() {
 
     protocol->connectOperation(op0, op1, tautology);
     protocol->connectOperation(op1, op2, tautology);
+    protocol->connectOperation(op2, op3, tautology);
     protocol->connectOperation(op3, op4, tautology);
     protocol->connectOperation(op4, op5, tautology);
     protocol->connectOperation(op5, op6, tautology);
@@ -237,21 +351,254 @@ ProtocolGraph* makeEvoprogProtocol() {
     protocol->connectOperation(op7, op8, tautology);
     protocol->connectOperation(op8, op9, tautology);
     protocol->connectOperation(op9, op10, tautology);
-    protocol->connectOperation(op10, op11, tautology);
-    protocol->connectOperation(op11, loop, tautology);
 
-    ProtocolGraph::ProtocolNodePtr loop1 = std::make_shared<LoopNode>(serial.getNextValue(), comp1);
-    std::shared_ptr<MathematicOperable> num20(new ConstantNumber(20000));
+    std::shared_ptr<MathematicOperable> num20(new ConstantNumber(180000));
     std::shared_ptr<VariableEntry> time(
         new VariableEntry(TIME_VARIABLE));
     std::shared_ptr<MathematicOperable> mtime(
         new VariableEntry(TIME_VARIABLE));
-
     std::shared_ptr<ComparisonOperable> comp1(
         new SimpleComparison(false, mtime, comparison::less, num20));
 
-    return protocol;*/
-    return NULL;
+    ProtocolGraph::ProtocolNodePtr loop1 = std::make_shared<LoopNode>(serial.getNextValue(), comp1);
+
+    protocol->addOperation(loop1);
+    protocol->connectOperation(op10, loop1, tautology);
+
+    int actualTime = 0;
+    ProtocolGraph::ProtocolNodePtr lastNodeBefore = loop1;
+    ProtocolGraph::ProtocolNodePtr lastIf;
+    shared_ptr<ComparisonOperable> lastNotComparison;
+
+    //step 1
+    for (int i = 0; i < 3; i++) {
+
+        ProtocolGraph::ProtocolNodePtr opLChemo1 = std::make_shared<SetContinousFlow>(serial.getNextValue(), NaOH + i, CHEMO_1, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo1Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_1, CELLSTAT, num2);
+        ProtocolGraph::ProtocolNodePtr opCellWaste = std::make_shared<SetContinousFlow>(serial.getNextValue(), CELLSTAT, WASTE, num2);
+
+        protocol->addOperation(opLChemo1);
+        protocol->addOperation(opChemo1Cell);
+        protocol->addOperation(opCellWaste);
+
+        protocol->connectOperation(opLChemo1, opChemo1Cell, tautology);
+        protocol->connectOperation(opChemo1Cell, opCellWaste, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp;
+        ProtocolGraph::ProtocolNodePtr nodeIf1 = createifOperation(actualTime, 5000, opLChemo1, NULL, serial, protocol, tempComp);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf1, lastNotComparison);
+        }
+
+        if (i == 0) {
+            protocol->connectOperation(lastNodeBefore, nodeIf1, comp1);
+        } else {
+            protocol->connectOperation(lastNodeBefore, nodeIf1, tautology);
+        }
+
+        lastNodeBefore = opCellWaste;
+        lastIf = nodeIf1;
+        lastNotComparison = tempComp;
+        actualTime += 5000;
+
+        ProtocolGraph::ProtocolNodePtr opLChemo2 = std::make_shared<SetContinousFlow>(serial.getNextValue(), NaOH + i, CHEMO_2, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo2Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_2, CELLSTAT, num2);
+        ProtocolGraph::ProtocolNodePtr opCellWaste2 = std::make_shared<SetContinousFlow>(serial.getNextValue(), CELLSTAT, WASTE, num2);
+
+        protocol->addOperation(opLChemo2);
+        protocol->addOperation(opChemo2Cell);
+        protocol->addOperation(opCellWaste2);
+
+        protocol->connectOperation(opLChemo2, opChemo2Cell, tautology);
+
+        protocol->connectOperation(opChemo2Cell, opCellWaste2, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp2;
+        ProtocolGraph::ProtocolNodePtr nodeIf12 = createifOperation(actualTime, 5000, opLChemo2, NULL, serial, protocol, tempComp2);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf12, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf12, tautology);
+
+        lastNodeBefore = opCellWaste2;
+        lastIf = nodeIf12;
+        lastNotComparison = tempComp2;
+        actualTime += 5000;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        ProtocolGraph::ProtocolNodePtr opLChemo1 = std::make_shared<SetContinousFlow>(serial.getNextValue(), NaOH + i, CHEMO_2, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo1Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_2, CELLSTAT, num2);
+        ProtocolGraph::ProtocolNodePtr opCellWaste = std::make_shared<SetContinousFlow>(serial.getNextValue(), CELLSTAT, CLEANING_WASTE, num2);
+
+        protocol->addOperation(opLChemo1);
+        protocol->addOperation(opChemo1Cell);
+        protocol->addOperation(opCellWaste);
+
+        protocol->connectOperation(opLChemo1, opChemo1Cell, tautology);
+        protocol->connectOperation(opChemo1Cell, opCellWaste, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp;
+        ProtocolGraph::ProtocolNodePtr nodeIf1 = createifOperation(actualTime, 5000, opLChemo1, NULL, serial, protocol, tempComp);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf1, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf1, tautology);
+
+        lastNodeBefore = opCellWaste;
+        lastIf = nodeIf1;
+        lastNotComparison = tempComp;
+        actualTime += 5000;
+    }
+
+    //step 2
+    for (int i = 0; i < 3; i++) {
+        ProtocolGraph::ProtocolNodePtr opLChemo1 = std::make_shared<SetContinousFlow>(serial.getNextValue(), NaOH + i, CHEMO_1, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo1Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_1, CLEANING_WASTE, num2);
+
+        protocol->addOperation(opLChemo1);
+        protocol->addOperation(opChemo1Cell);
+
+        protocol->connectOperation(opLChemo1, opChemo1Cell, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp;
+        ProtocolGraph::ProtocolNodePtr nodeIf1 = createifOperation(actualTime, 5000, opLChemo1, NULL, serial, protocol, tempComp);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf1, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf1, tautology);
+
+        lastNodeBefore = opChemo1Cell;
+        lastIf = nodeIf1;
+        lastNotComparison = tempComp;
+        actualTime += 5000;
+
+        ProtocolGraph::ProtocolNodePtr opLChemo2 = std::make_shared<SetContinousFlow>(serial.getNextValue(), NaOH + i, CHEMO_2, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo2Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_2, CLEANING_WASTE, num2);
+
+        protocol->addOperation(opLChemo2);
+        protocol->addOperation(opChemo2Cell);
+
+        protocol->connectOperation(opLChemo2, opChemo2Cell, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp2;
+        ProtocolGraph::ProtocolNodePtr nodeIf12 = createifOperation(actualTime, 5000, opLChemo2, NULL, serial, protocol, tempComp2);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf12, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf12, tautology);
+
+        lastNodeBefore = opChemo2Cell;
+        lastIf = nodeIf12;
+        lastNotComparison = tempComp2;
+        actualTime += 5000;
+    }
+
+    //step 3
+    for (int i = 0; i < 2; i++) {
+        ProtocolGraph::ProtocolNodePtr opLChemo1 = std::make_shared<SetContinousFlow>(serial.getNextValue(), AIR, CHEMO_1 + i, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo1Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_1 + i, CLEANING_WASTE, num2);
+
+        protocol->addOperation(opLChemo1);
+        protocol->addOperation(opChemo1Cell);
+
+        protocol->connectOperation(opLChemo1, opChemo1Cell, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp;
+        ProtocolGraph::ProtocolNodePtr nodeIf1 = createifOperation(actualTime, 25000, opLChemo1, NULL, serial, protocol, tempComp);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf1, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf1, tautology);
+
+        lastNodeBefore = opChemo1Cell;
+        lastIf = nodeIf1;
+        lastNotComparison = tempComp;
+        actualTime += 25000;
+
+        ProtocolGraph::ProtocolNodePtr stop = std::make_shared<SetContinousFlow>(serial.getNextValue(), AIR, CHEMO_1 + i, num0);
+        ProtocolGraph::ProtocolNodePtr opLChemo2 = std::make_shared<SetContinousFlow>(serial.getNextValue(), MEDIA_1 + i, CHEMO_1 + i, num2);
+        ProtocolGraph::ProtocolNodePtr opChemo2Cell = std::make_shared<SetContinousFlow>(serial.getNextValue(), CHEMO_1 + i, CELLSTAT, num2);
+        ProtocolGraph::ProtocolNodePtr opCellWaste = std::make_shared<SetContinousFlow>(serial.getNextValue(), CELLSTAT, WASTE, num2);
+
+        protocol->addOperation(stop);
+        protocol->addOperation(opLChemo2);
+        protocol->addOperation(opChemo2Cell);
+        protocol->addOperation(opCellWaste);
+
+        protocol->connectOperation(stop, opLChemo2, tautology);
+        protocol->connectOperation(opLChemo2, opChemo2Cell, tautology);
+        protocol->connectOperation(opChemo2Cell, opCellWaste, tautology);
+
+        shared_ptr<ComparisonOperable> tempComp2;
+        ProtocolGraph::ProtocolNodePtr nodeIf12 = createifOperation(actualTime, 25000, stop, NULL, serial, protocol, tempComp2);
+
+        if (lastIf) {
+            protocol->connectOperation(lastIf, nodeIf12, lastNotComparison);
+        }
+
+        protocol->connectOperation(lastNodeBefore, nodeIf12, tautology);
+
+        lastNodeBefore = opCellWaste;
+        lastIf = nodeIf12;
+        lastNotComparison = tempComp2;
+        actualTime += 25000;
+    }
+
+    //step 4
+    ProtocolGraph::ProtocolNodePtr opLChemo1 = std::make_shared<SetContinousFlow>(serial.getNextValue(), MEDIA_2, CHEMO_2, num0);
+    protocol->addOperation(opLChemo1);
+
+    shared_ptr<ComparisonOperable> tempComp;
+    ProtocolGraph::ProtocolNodePtr nodeIf1 = createifOperation(actualTime, 1000, opLChemo1, NULL, serial, protocol, tempComp);
+
+    if (lastIf) {
+        protocol->connectOperation(lastIf, nodeIf1, lastNotComparison);
+    }
+
+    protocol->connectOperation(lastNodeBefore, nodeIf1, tautology);
+
+    lastNodeBefore = opLChemo1;
+    lastIf = nodeIf1;
+    lastNotComparison = tempComp;
+    actualTime += 1000;
+
+    //loop
+
+    ProtocolGraph::ProtocolNodePtr timeStep = std::make_shared<TimeStep>(serial.getNextValue(), time);
+
+    protocol->addOperation(timeStep);
+    protocol->connectOperation(lastNodeBefore, timeStep, tautology);
+    protocol->connectOperation(lastIf, timeStep, lastNotComparison);
+    protocol->connectOperation(timeStep, loop1, tautology);
+
+    return protocol;
+}
+
+void testPathManager() {
+    LOG(INFO) << "creating machine...";
+    std::shared_ptr<ExecutableMachineGraph> machine = std::shared_ptr<ExecutableMachineGraph>(ExecutableMachineGraph::fromJSON("machineLayoutv3.json"));
+
+    PathManager manager(machine);
+
+    LOG(INFO) << " flows from inlet to bidirectional..";
+
+    shared_ptr<SearcherIterator> it = manager.getFlows(make_shared<ContainerNodeType>(MovementType::continuous, ContainerType::inlet), make_shared<ContainerNodeType>(MovementType::continuous, ContainerType::bidirectional_switch));
+
+    while (it->hasNext()) {
+        LOG(INFO) << it->next()->toText();
+    }
 }
 
 
@@ -264,12 +611,29 @@ int main(int argc, char *argv[])
     el::Configurations c("./configuration/log.ini");
     el::Loggers::reconfigureAllLoggers(c);
 
-    LOG(INFO) << "making protocol...";
+    /*LOG(INFO) << "making turbidostat...";
     ProtocolGraph* protocol = makeTurbidostat();
     LOG(INFO) << "printing graph...";
     protocol->printProtocol("turbidostatProtocol.graph");
     LOG(INFO) << "printing JSON...";
     ProtocolGraph::toJSON("turbidostatProtocol.json", *protocol);
+
+    LOG(INFO) << "making chemostat...";
+    ProtocolGraph* chemo = makeQuemostat();
+    LOG(INFO) << "printing graph...";
+    chemo->printProtocol("chemostatProtocol.graph");
+    LOG(INFO) << "printing JSON...";
+    ProtocolGraph::toJSON("chemostatProtocol.json", *chemo);*/
+
+    LOG(INFO) << "making cleaning...";
+    ProtocolGraph* chemo = makeEvoprogProtocolClean();
+    LOG(INFO) << "printing graph...";
+    chemo->printProtocol("cleaningProtocol.graph");
+    LOG(INFO) << "printing JSON...";
+    ProtocolGraph::toJSON("cleaningProtocol.json", *chemo);
+
+    //testPathManager();
+
     LOG(INFO) << "done!";
 
     return a.exec();
