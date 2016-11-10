@@ -53,6 +53,47 @@
 #include "util/AutoEnumerate.h"
 #include "util/logutils.h"
 
+#include "fluidControl/ExecutionEngine.h"
+#include "fluidControl/mapping/MappingEngine.h"
+#include "fluidControl/machineGraph/MachineGraph.h"
+#include "fluidControl/machineGraph/ContainerNode.h"
+#include "fluidControl/machineGraph/ContainerNodeType.h"
+
+#include "fluidControl/executable/containers/actuators/liquids/Control.h"
+#include "fluidControl/executable/containers/actuators/liquids/Injector.h"
+#include "fluidControl/executable/containers/actuators/liquids/Extractor.h"
+
+#include "fluidControl/executable/containers/actuators/extras/Temperature.h"
+#include "fluidControl/executable/containers/actuators/extras/ODSensor.h"
+#include "fluidControl/executable/containers/actuators/extras/Light.h"
+#include "fluidControl/executable/containers/actuators/extras/Mixer.h"
+
+#include "fluidControl/executable/containers/actuators/communications/CommunicationsInterface.h"
+#include "fluidControl/executable/containers/actuators/communications/CommandSender.h"
+#include "fluidControl/executable/containers/actuators/communications/FileSender.h"
+#include "fluidControl/executable/containers/actuators/communications/SerialSender.h"
+
+#include "fluidControl/executable/containers/InletContainer.h"
+#include "fluidControl/executable/containers/BidirectionalSwitch.h"
+#include "fluidControl/executable/containers/ConvergentSwitch.h"
+#include "fluidControl/executable/containers/ConvergentSwitchInlet.h"
+#include "fluidControl/executable/containers/DivergentSwitch.h"
+#include "fluidControl/executable/containers/DivergentSwitchSink.h"
+#include "fluidControl/executable/containers/ExecutableContainerNode.h"
+#include "fluidControl/executable/containers/FlowContainer.h"
+#include "fluidControl/executable/containers/SinkContainer.h"
+
+//plugins
+#include "plugin/PluginFileLoader.h"
+#include "plugin/PythonEnvironment.h"
+#include "plugin/actuators/ODSensorPlugin.h"
+#include "plugin/actuators/MixerPlugin.h"
+#include "plugin/actuators/TemperaturePlugin.h"
+#include "plugin/actuators/LightPlugin.h"
+#include "plugin/actuators/ControlPlugin.h"
+#include "plugin/actuators/ExtractorPlugin.h"
+#include "plugin/actuators/InjectorPlugin.h"
+
 INITIALIZE_NULL_EASYLOGGINGPP
 
 using namespace std;
@@ -601,6 +642,121 @@ void testPathManager() {
     }
 }
 
+MachineGraph* makeTurbidostatSketch() {
+    MachineGraph* sketch = new MachineGraph("sketchTurbidostat");
+
+    std::shared_ptr<ContainerNodeType> cinlet(new ContainerNodeType(MovementType::continuous, ContainerType::inlet));
+    std::shared_ptr<ContainerNodeType> cFlow(new ContainerNodeType(MovementType::continuous, ContainerType::flow));
+    std::shared_ptr<ContainerNodeType> sink(new ContainerNodeType(MovementType::irrelevant, ContainerType::sink));
+
+    sketch->addContainer(1, cinlet, 100.0);
+    sketch->addContainer(2, cFlow, 100.0);
+    sketch->addContainer(3, sink, 100.0);
+
+    sketch->connectContainer(1, 2);
+    sketch->connectContainer(2, 3);
+
+    return sketch;
+}
+
+ProtocolGraph* makeTimeProtocol()
+{
+    AutoEnumerate serial;
+    ProtocolGraph* protocol = new ProtocolGraph("simpleProtocol");
+
+    std::shared_ptr<ComparisonOperable> tautology(new Tautology());
+    std::shared_ptr<MathematicOperable> num1(new ConstantNumber(0.001));
+    std::shared_ptr<MathematicOperable> num60000(new ConstantNumber(60000));
+    std::shared_ptr<MathematicOperable> num65(new ConstantNumber(65));
+
+    ProtocolGraph::ProtocolNodePtr op1 = std::make_shared<LoadContainerOperation>(serial.getNextValue(), 1, num65); //loadContainer(1, 1000ml)
+
+    protocol->addOperation(op1);
+
+    std::shared_ptr<VariableEntry> time(
+        new VariableEntry(TIME_VARIABLE));
+    std::shared_ptr<MathematicOperable> mtime(
+        new VariableEntry(TIME_VARIABLE));
+    std::shared_ptr<ComparisonOperable> comp2in(
+        new SimpleComparison(false, mtime, comparison::less_equal, num60000));
+    ProtocolGraph::ProtocolNodePtr loop1 = std::make_shared<LoopNode>(serial.getNextValue(), comp2in); //while ( t <= 60s)
+
+    protocol->addOperation(loop1);
+    protocol->connectOperation(op1, loop1, tautology);
+
+    ProtocolGraph::ProtocolNodePtr op2 = std::make_shared<SetContinousFlow>(serial.getNextValue(), 1, 2, num1);
+    ProtocolGraph::ProtocolNodePtr op3 = std::make_shared<SetContinousFlow>(serial.getNextValue(), 2, 3, num1);
+
+    protocol->addOperation(op2);
+    protocol->connectOperation(loop1, op2, comp2in);
+    protocol->addOperation(op3);
+    protocol->connectOperation(op2, op3, tautology);
+    ProtocolGraph::ProtocolNodePtr timeStep = std::make_shared<TimeStep>(serial.getNextValue(), time);
+
+    protocol->addOperation(timeStep);
+    protocol->connectOperation(op3, timeStep, tautology);
+    protocol->connectOperation(timeStep, loop1, tautology);
+
+    protocol->setStartNode(op1->getContainerId());
+    return protocol;
+}
+
+ExecutableMachineGraph* makeMappingMachine(int communications,
+                                                      std::unique_ptr<CommandSender> exec,
+                                                      std::unique_ptr<CommandSender> test)
+{
+    ExecutableMachineGraph* machine = new ExecutableMachineGraph(
+                "mappingMachine", std::move(exec), std::move(test));
+
+    std::unordered_map<std::string, std::string> paramsc = {{"address","46"},
+                                                            {"closePos","0"}};
+    std::shared_ptr<Control> control(
+                new ControlPlugin(communications,"v1", "Evoprog4WayValve", paramsc));
+
+    std::unordered_map<std::string, std::string> paramse = {{"address","7"},
+                                                            {"direction","0"}};
+    std::shared_ptr<Extractor> cExtractor(
+                new ExtractorPlugin(communications,"p1", "EvoprogV2Pump", paramse));
+
+    std::unordered_map<std::string, std::string> paramsi;
+    std::shared_ptr<Injector> dummyInjector(
+                new InjectorPlugin(communications, "dummy", "EvoprogDummyInjector", paramsi));
+
+    std::unordered_map<std::string, std::string> paramso = {{"pinNumber","14"}};
+    std::shared_ptr<ODSensor> sensor(new ODSensorPlugin(communications, "sensor1", "EvoprogOdSensor", paramso));
+
+    ExecutableMachineGraph::ExecutableContainerNodePtr cInlet1 = std::make_shared<InletContainer>(1, 100.0, cExtractor);
+    ExecutableMachineGraph::ExecutableContainerNodePtr cInlet2 = std::make_shared<DivergentSwitchSink>(2, 100.0, dummyInjector, cExtractor, control);
+    ExecutableMachineGraph::ExecutableContainerNodePtr cInlet3 = std::make_shared<FlowContainer>(3, 100.0, cExtractor, dummyInjector);
+    ExecutableMachineGraph::ExecutableContainerNodePtr cInlet4 = std::make_shared<InletContainer>(4, 100.0, cExtractor);
+
+
+    ExecutableMachineGraph::ExecutableContainerNodePtr cSwtInlet5 = std::make_shared<ConvergentSwitchInlet>(5, 100.0,
+                                                                                                            dummyInjector, cExtractor, control);
+    ExecutableMachineGraph::ExecutableContainerNodePtr cSwtInlet6 = std::make_shared<BidirectionalSwitch>(6, 100.0,
+                                                                                                          cExtractor, dummyInjector, control, control);
+    cSwtInlet6->setOd(sensor);
+    ExecutableMachineGraph::ExecutableContainerNodePtr cSwich7 = std::make_shared<ConvergentSwitch>(7, 100.0, dummyInjector, control);
+
+    machine->addContainer(cInlet1);
+    machine->addContainer(cInlet2);
+    machine->addContainer(cInlet3);
+    machine->addContainer(cInlet4);
+    machine->addContainer(cSwtInlet5);
+    machine->addContainer(cSwtInlet6);
+    machine->addContainer(cSwich7);
+
+    machine->connectExecutableContainer(1, 5);
+    machine->connectExecutableContainer(2, 5);
+    machine->connectExecutableContainer(3, 6);
+    machine->connectExecutableContainer(4, 6);
+    machine->connectExecutableContainer(5, 7);
+    machine->connectExecutableContainer(6, 7);
+    machine->connectExecutableContainer(6, 2);
+    machine->connectExecutableContainer(2, 3);
+
+    return machine;
+}
 
 int main(int argc, char *argv[])
 {
@@ -625,18 +781,41 @@ int main(int argc, char *argv[])
     LOG(INFO) << "printing JSON...";
     ProtocolGraph::toJSON("chemostatProtocol.json", *chemo);*/
 
-    LOG(INFO) << "making cleaning...";
+    /*LOG(INFO) << "making cleaning...";
     ProtocolGraph* chemo = makeEvoprogProtocolClean();
     LOG(INFO) << "printing graph...";
     chemo->printProtocol("cleaningProtocol.graph");
     LOG(INFO) << "printing JSON...";
-    ProtocolGraph::toJSON("cleaningProtocol.json", *chemo);
+    ProtocolGraph::toJSON("cleaningProtocol.json", *chemo);*/
 
     //testPathManager();
 
+    /*LOG(INFO) << "making turbidostat sketch...";
+    MachineGraph* chemo = makeTurbidostatSketch();
+    LOG(INFO) << "printing graph...";
+    chemo->printMachine("turbidostatSketch.graph");
+    LOG(INFO) << "generating JSON...";
+    MachineGraph::toJSON("turbidostatSketch.json", *chemo);*/
+
+    /*LOG(INFO) << "making protocol...";
+    ProtocolGraph* chemo = makeTimeProtocol();
+    LOG(INFO) << "printing graph...";
+    chemo->printProtocol("timeProtocol.graph");
+    LOG(INFO) << "generating JSON...";
+    ProtocolGraph::toJSON("timeProtocol.json", *chemo);*/
+
+    /*PythonEnvironment::GetInstance()->initEnvironment();
+
+    std::unique_ptr<CommandSender> comEx = std::unique_ptr<CommandSender>(new SerialSender("\\\\.\\COM3"));
+    std::unique_ptr<CommandSender> comTest = std::unique_ptr<CommandSender>(new FileSender("test.log", "inputFileData.txt"));
+    int com = CommunicationsInterface::GetInstance()->addCommandSender(comEx->clone());
+
+    std::shared_ptr<ExecutableMachineGraph> machine(makeMappingMachine(com, std::move(comEx), std::move(comTest)));
+    ExecutableMachineGraph::toJSON("exMachine.json", *machine.get());
+
     LOG(INFO) << "done!";
 
-    return a.exec();
+    PythonEnvironment::GetInstance()->finishEnvironment();*/
 }
 
 
